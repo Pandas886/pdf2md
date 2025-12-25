@@ -6,7 +6,11 @@ from io import BytesIO
 from processor import PDFProcessor, InvalidTokenError
 from utils import create_zip_archive
 
-st.set_page_config(page_title="PDF 转 Markdown 转换器", layout="wide")
+st.set_page_config(
+    page_title="PDF 转 Markdown 转换器", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 st.title("PDF 转 Markdown 转换器")
 st.markdown("""
@@ -17,6 +21,19 @@ st.markdown("""
 # Get Token from URL or Sidebar
 query_params = st.query_params
 url_token = query_params.get("token", None)
+
+# Feature Highlights in Sidebar
+st.sidebar.divider()
+st.sidebar.markdown("### 🌟 核心优势")
+st.sidebar.markdown("""
+- **高保真解析**：深度还原文档结构，表格、公式精准识别。
+- **自动拆分**：按 10 页自动切片，降低单次解析压力，支持分段恢复。
+- **智能并发**：多线程并行处理，大文件转换速度飞快。
+- **断点续传**：内置缓存机制，中断后可秒级恢复，拒绝从头再来。
+- **批量处理**：支持多文件同时上传，自动排队处理。
+- **安全隐私**：Token 本地校验，支持 URL 动态传递。
+""")
+st.sidebar.info("💡 **提示**：首次使用请准备好 API Token，不同文件的解析可以并行排队。")
 
 if url_token:
     api_token = url_token
