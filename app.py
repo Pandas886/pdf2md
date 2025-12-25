@@ -1,7 +1,9 @@
 import streamlit as st
 import os
 import shutil
-from processor import PDFProcessor
+import zipfile
+from io import BytesIO
+from processor import PDFProcessor, InvalidTokenError
 from utils import create_zip_archive
 
 st.set_page_config(page_title="PDF 转 Markdown 转换器", layout="wide")
@@ -30,87 +32,120 @@ if 'processor' not in st.session_state or st.session_state.get('current_token') 
     st.session_state.processor = PDFProcessor(token=api_token)
     st.session_state.current_token = api_token
 
-uploaded_file = st.file_uploader("选择 PDF 文件", type="pdf")
+uploaded_files = st.file_uploader("选择 PDF 文件 (支持多选)", type="pdf", accept_multiple_files=True)
 
-if uploaded_file is not None:
-    # Read file info
-    file_bytes = uploaded_file.read()
-    file_size_mb = len(file_bytes) / (1024 * 1024)
+if uploaded_files:
+    # Summary of selected files
+    total_size_mb = sum([file.size for file in uploaded_files]) / (1024 * 1024)
+    st.info(f"已选择 {len(uploaded_files)} 个文件，总大小: {total_size_mb:.2f} MB")
     
-    st.info(f"文件大小: {file_size_mb:.2f} MB")
+    # Initialize state
+    if 'processing' not in st.session_state:
+        st.session_state.processing = False
+    if 'results' not in st.session_state:
+        st.session_state.results = []
     
-    # Analyze PDF
-    try:
-        # We split just to count pages and preview
-        # Check if we should start processing
-        if 'processing' not in st.session_state:
-            st.session_state.processing = False
-            
-        chunks, total_pages = st.session_state.processor.split_pdf(file_bytes)
-        st.write(f"**总页数:** {total_pages}")
-        
-        processing_pages = total_pages
-            
-        st.write(f"**处理页数:** {processing_pages}")
-        st.write(f"**预计切片数:** {len(chunks)}")
-        
-        start_button = st.button("开始转换", disabled=st.session_state.processing)
-        
-        if start_button:
-            st.session_state.processing = True
-            st.rerun()
+    # Start Button is disabled during processing
+    start_button = st.button("开始批量转换", disabled=st.session_state.processing)
+    
+    if start_button:
+        st.session_state.processing = True
+        st.session_state.results = [] # Clear previous results
+        st.rerun()
 
-        if st.session_state.processing:
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+    # Processing Phase
+    if st.session_state.processing:
+        st.divider()
+        st.write("### ⏳ 正在处理...")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            status_text.text(f"正在处理第 {idx+1}/{len(uploaded_files)} 个文件: {uploaded_file.name}")
             
-            def update_progress(progress):
-                progress_bar.progress(progress)
-                status_text.text(f"正在处理... {int(progress * 100)}%")
-
             try:
-                start_time = os.times().elapsed
+                file_bytes = uploaded_file.getvalue()
+                
+                # Update progress callback
+                def update_progress(progress):
+                    # Combine overall progress with chunk progress could be complex, 
+                    # simple approach: just show chunk progress for current file in the main bar, 
+                    # or update text. Let's keep it simple.
+                    progress_bar.progress(progress)
+                
+                # Process
                 markdown_content, images_map = st.session_state.processor.process_pdf(file_bytes, progress_callback=update_progress)
                 
-                status_text.text("处理完成！正在准备下载...")
-                
                 # Create Zip
-                output_zip = create_zip_archive(markdown_content, images_map, "output.zip")
+                original_name = os.path.splitext(uploaded_file.name)[0]
+                download_filename = f"{original_name}.zip"
+                output_zip = create_zip_archive(markdown_content, images_map, f"output_{idx}.zip")
                 
-                # Read zip for download
                 with open(output_zip, "rb") as f:
                     zip_data = f.read()
                 
-                st.success("转换成功！")
-                
-                # Derive output filename from uploaded filename
-                original_name = os.path.splitext(uploaded_file.name)[0]
-                download_filename = f"{original_name}.zip"
-
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.download_button(
-                        label="下载 Markdown (Zip)",
-                        data=zip_data,
-                        file_name=download_filename,
-                        mime="application/zip"
-                    )
-                
-                # Cleanup
                 os.remove(output_zip)
                 
-                # Preview (First 500 chars)
-                with st.expander("预览 Markdown 内容"):
-                    st.text_area("预览", markdown_content[:2000] + "...", height=300)
+                # Store result in session state
+                st.session_state.results.append({
+                    "name": uploaded_file.name,
+                    "zip_data": zip_data,
+                    "download_name": download_filename,
+                    "preview": markdown_content[:1000]
+                })
                 
-                # Reset processing state so user can start over if they upload new file or want to retry
-                # Actually, if we reset here, the button re-enables.
+            except InvalidTokenError as e:
+                st.error(f"🚫 **鉴权失败**: {str(e)}")
+                st.error("请检查您的 Token 是否正确，或是否已过期。处理已停止。")
                 st.session_state.processing = False
+                break # Stop processing subsequent files
 
             except Exception as e:
-                st.error(f"处理过程中出错: {str(e)}")
-                st.session_state.processing = False
+                st.error(f"❌ 文件 `{uploaded_file.name}` 处理出错: {str(e)}")
+        
+        # Processing Complete (only if not aborted)
+        if st.session_state.processing:
+            st.session_state.processing = False
+            st.rerun()
 
-    except Exception as e:
-        st.error(f"读取 PDF 失败: {str(e)}")
+    # Result Display Phase (Persistent)
+    if st.session_state.results:
+        st.divider()
+        st.write("### ✅ 处理完成")
+        
+        # Download All Button
+        if len(st.session_state.results) > 1:
+            # Create a master zip in memory
+            master_zip_buffer = BytesIO()
+            with zipfile.ZipFile(master_zip_buffer, "w") as master_zip:
+                for res in st.session_state.results:
+                    master_zip.writestr(res['download_name'], res['zip_data'])
+            
+            master_zip_buffer.seek(0)
+            
+            st.download_button(
+                label="📦 一键下载所有文件",
+                data=master_zip_buffer,
+                file_name="all_converted_files.zip",
+                mime="application/zip",
+                key="dl_all_top"
+            )
+            st.divider()
+        
+        for idx, res in enumerate(st.session_state.results):
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"📄 **{res['name']}**")
+                    with st.expander("预览内容"):
+                        st.text_area("Preview", res['preview'], height=150, key=f"prev_{idx}")
+                with col2:
+                    st.download_button(
+                        label="⬇️ 下载 ZIP",
+                        data=res['zip_data'],
+                        file_name=res['download_name'],
+                        mime="application/zip",
+                        key=f"dl_{idx}"  # Unique key ensures button works independently
+                    )
+                st.divider()

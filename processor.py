@@ -4,10 +4,10 @@ import time
 import hashlib
 import shutil
 import base64
-import requests
 import logging
+import requests
+from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date
 from io import BytesIO
 from typing import List, Dict, Tuple, Optional
 from pypdf import PdfReader, PdfWriter
@@ -18,6 +18,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+
+class InvalidTokenError(Exception):
+    """Raised when the API token is invalid (403 Forbidden)."""
+    pass
 
 class APIClient:
     def __init__(self, token: str):
@@ -78,9 +82,17 @@ class APIClient:
                         return result["result"]
                     else:
                         logger.warning(f"Unexpected response structure from {short_url}: {result}")
+                
+                elif response.status_code == 403:
+                    # Invalid Token - Stop trying other URLs and raise specific error
+                    raise InvalidTokenError("Token 无效或已过期 (403 Forbidden)")
+                
                 else:
                     logger.warning(f"API {short_url} returned status {response.status_code}: {response.text}")
                     
+            except InvalidTokenError:
+                # Re-raise immediately to stop trying other URLs
+                raise
             except Exception as e:
                 logger.error(f"Error calling {short_url}: {str(e)}")
             
@@ -147,23 +159,35 @@ class PDFProcessor:
                 for i, (start_page, chunk_bytes) in enumerate(chunks)
             }
             
-            completed_count = 0
-            for future in as_completed(future_to_index):
-                i = future_to_index[future]
-                try:
-                    res = future.result()
-                    results[i] = res
-                except Exception as e:
-                    logger.error(f"Chunk {i} failed: {e}")
-                    # We continue other chunks? Or fail hard?
-                    # If we fail hard, user can retry and resume from cache.
-                    # Let's fail hard so user knows something is wrong.
-                    raise e
-                
-                completed_count += 1
-                if progress_callback:
-                    progress_callback(completed_count / len(chunks))
-
+            completed_chunks = 0
+            total_chunks = len(chunks)
+            try:
+                for future in as_completed(future_to_index):
+                    chunk_index = future_to_index[future]
+                    try:
+                        result = future.result()
+                        results[chunk_index] = result
+                        
+                        # Update progress
+                        completed_chunks += 1
+                        if progress_callback:
+                            progress_callback(completed_chunks / total_chunks)
+                            
+                    except InvalidTokenError:
+                        logger.error(f"Chunk {chunk_index} failed: Token Invalid. Stopping all tasks.")
+                        # Critical: Cancel all other pending futures immediately
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise # Re-raise to get out of process_pdf
+                        
+                    except Exception as e:
+                        logger.error(f"Chunk {chunk_index} failed: {e}")
+                        # Other errors might be transient, but here we fail hard as per previous logic
+                        # If you want to stop on ANY error:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise e
+            except Exception:
+                # Ensure we catch re-raised exceptions and clean up
+                raise
         # Merge results
         # Result structure: {'layoutParsingResults': [{'markdown': {'text': '...', 'images': {'...': 'url'}}}]}
         # We need to stitch markdown and download images.
