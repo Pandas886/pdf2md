@@ -16,41 +16,7 @@ from pypdf import PdfReader, PdfWriter
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class UsageTracker:
-    def __init__(self, token: str):
-        # Create a unique filename based on the token
-        token_hash = hashlib.md5(token.encode()).hexdigest()[:8]
-        self.filename = f"usage_tracking_{token_hash}.json"
-        
-        self.limit = 3000
-        self._load()
 
-    def _load(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, 'r') as f:
-                    self.data = json.load(f)
-            except json.JSONDecodeError:
-                self.data = {}
-        else:
-            self.data = {}
-
-    def _save(self):
-        with open(self.filename, 'w') as f:
-            json.dump(self.data, f)
-
-    def get_todays_usage(self) -> int:
-        today_str = date.today().isoformat()
-        return self.data.get(today_str, 0)
-
-    def add_usage(self, pages: int):
-        today_str = date.today().isoformat()
-        current = self.data.get(today_str, 0)
-        self.data[today_str] = current + pages
-        self._save()
-
-    def check_limit(self, pages_to_add: int) -> bool:
-        return (self.get_todays_usage() + pages_to_add) <= self.limit
 
 class APIClient:
     def __init__(self, token: str):
@@ -64,7 +30,7 @@ class APIClient:
 
 
 
-    def process_chunk(self, file_bytes: bytes, chunk_index: int, pdf_hash: str, tracker: 'UsageTracker') -> Dict:
+    def process_chunk(self, file_bytes: bytes, chunk_index: int, pdf_hash: str) -> Dict:
         """
         Process a single PDF chunk with caching and failover.
         """
@@ -103,19 +69,9 @@ class APIClient:
                         with open(cache_file, 'w') as f:
                             json.dump(result["result"], f)
                         
-                        # Immediate usage update (10 pages per chunk)
-                        # Note: This tracks *requests* made. If a chunk has <10 pages, it still counts as a chunk of work, 
-                        # but strictly we should count actual pages. 
-                        # However, for simplicity and safety, we can update by 10 or calculate exact page count of this chunk if needed.
-                        # Given the split logic, most chunks are 10 pages. usage tracker updates total, let's allow passing chunk size.
-                        # But here we don't have chunk size easily without parsing PDF bytes again. 
-                        # Let's trust the Caller to handle total usage checks, BUT the requirement is "Timely update".
-                        # So we should update here.
+                        # Immediate usage update removed. 
                         
-                        # Better approach: We passed 'tracker' to this method.
-                        # We know chunk size is roughly 10. Let's be conservative and say we update 10?
-                        # Or better, just update based on the config. 
-                        tracker.add_usage(10) 
+                        return result["result"] 
                         
                         return result["result"]
                     else:
@@ -134,7 +90,6 @@ class APIClient:
 
 class PDFProcessor:
     def __init__(self, token: str):
-        self.tracker = UsageTracker(token)
         self.api_client = APIClient(token)
         self.chunk_size = 10 # Pages per chunk
 
@@ -177,11 +132,6 @@ class PDFProcessor:
         # Calculate hash for caching
         pdf_hash = hashlib.md5(file_bytes).hexdigest()
 
-        # Check quota is effectively checked in loop or pre-check.
-        # But for pre-check we still want to block if totally out.
-        if not self.tracker.check_limit(0): # Just check if already over limit
-             raise Exception(f"Daily limit reached. Usage: {self.tracker.get_todays_usage()}/3000")
-
         # Process chunks in parallel
         results = [None] * len(chunks)
         images_map = {} # path -> bytes
@@ -191,7 +141,7 @@ class PDFProcessor:
         # Reduced concurrency to 2 to avoid 429s and improve stability
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_index = {
-                executor.submit(self.api_client.process_chunk, chunk_bytes, i, pdf_hash, self.tracker): i 
+                executor.submit(self.api_client.process_chunk, chunk_bytes, i, pdf_hash): i 
                 for i, (start_page, chunk_bytes) in enumerate(chunks)
             }
             
