@@ -11,6 +11,7 @@ from datetime import datetime, date
 from io import BytesIO
 from typing import List, Dict, Tuple, Optional
 from pypdf import PdfReader, PdfWriter
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -57,8 +58,9 @@ class APIClient:
         urls = [self.primary_url, self.secondary_url]
         
         for url in urls:
+            short_url = urlparse(url).netloc[:9] + "..."
             try:
-                logger.info(f"Processing chunk {chunk_index} with URL: {url}")
+                logger.info(f"Processing chunk {chunk_index} with API: {short_url}")
                 response = requests.post(url, json=payload, headers=self.headers, timeout=300)
                 
                 if response.status_code == 200:
@@ -75,12 +77,12 @@ class APIClient:
                         
                         return result["result"]
                     else:
-                        logger.warning(f"Unexpected response structure from {url}: {result}")
+                        logger.warning(f"Unexpected response structure from {short_url}: {result}")
                 else:
-                    logger.warning(f"API {url} returned status {response.status_code}: {response.text}")
+                    logger.warning(f"API {short_url} returned status {response.status_code}: {response.text}")
                     
             except Exception as e:
-                logger.error(f"Error calling {url}: {str(e)}")
+                logger.error(f"Error calling {short_url}: {str(e)}")
             
             # If we are here, the current URL failed. Proceed to the next one properly
             logger.info(f"Retrying with next available API endpoint...")
